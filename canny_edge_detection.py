@@ -3,7 +3,7 @@ import numpy as np
 from mss import mss
 import win32gui
 import time
-
+2
 # Global variables
 drawing = False
 bbox = None
