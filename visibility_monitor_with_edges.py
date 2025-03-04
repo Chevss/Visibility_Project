@@ -16,9 +16,11 @@ monitoring = False
 frame = None
 target_window = None
 window_rect = None
+edge_detection_mode = False
+color_change_monitoring = False
 
-def get_average_colors_and_edges(frame, bbox):
-    """Get both RGB and grayscale intensity for a region, and apply Canny Edge Detection."""
+def get_average_colors(frame, bbox):
+    """Get both RGB and grayscale intensity for a region."""
     x1, y1, x2, y2 = bbox
     x = min(x1, x2)
     y = min(y1, y2)
@@ -29,17 +31,30 @@ def get_average_colors_and_edges(frame, bbox):
     rgb_means = np.mean(roi, axis=(0, 1))
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     intensity = np.mean(gray)
+    
+    return rgb_means, intensity
+
+def get_edges(frame, bbox):
+    """Apply Canny Edge Detection to the region inside the bounding box."""
+    x1, y1, x2, y2 = bbox
+    x = min(x1, x2)
+    y = min(y1, y2)
+    w = abs(x2 - x1)
+    h = abs(y2 - y1)
+    
+    roi = frame[y:y+h, x:x+w]
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 100, 200)
     edge_count = np.sum(edges > 0)
     
-    return rgb_means, intensity, edge_count
+    return edge_count, edges
 
 def save_reference_values():
     """Save reference values to a file."""
     data = {
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        'boxes': bbox_list,  # Saves box coordinates
-        'values': {k: {'rgb': v['rgb'], 'intensity': float(v['intensity']), 'edge_count': int(v['edge_count'])} for k, v in reference_values.items()}  # Convert to native types
+        'boxes': bbox_list,
+        'values': {k: {'rgb': v['rgb'], 'intensity': float(v['intensity'])} for k, v in reference_values.items()}
     }
     with open('reference_values.json', 'w') as f:
         json.dump(data, f)
@@ -99,18 +114,17 @@ def mouse_callback(event, x, y, flags, param):
         bbox_list.append((x1, y1, x2, y2))
         
         if frame is not None:
-            rgb, intensity, edge_count = get_average_colors_and_edges(frame, (x1, y1, x2, y2))
+            rgb, intensity = get_average_colors(frame, (x1, y1, x2, y2))
             reference_values[len(bbox_list)-1] = {
                 'rgb': rgb.tolist(),
-                'intensity': float(intensity),
-                'edge_count': int(edge_count)
+                'intensity': float(intensity)
             }
-            print(f"Box {len(bbox_list)} created with intensity: {intensity:.2f}, edges: {edge_count}")
+            print(f"Box {len(bbox_list)} created with intensity: {intensity:.2f}")
         
         current_bbox = []
 
 def main():
-    global frame, monitoring, target_window, window_rect
+    global frame, monitoring, target_window, window_rect, edge_detection_mode, color_change_monitoring
     
     # Initialize screen capture
     sct = mss()
@@ -140,6 +154,8 @@ def main():
     print("m: Start/stop monitoring")
     print("r: Reset boxes")
     print("s: Save reference values")
+    print("E: Toggle edge detection mode")
+    print("C: Toggle color change monitoring")
     print("q: Quit\n")
     
     while True:
@@ -158,6 +174,8 @@ def main():
             })
             
             frame = np.array(screenshot)
+            if frame.size == 0:
+                continue
             frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
             
             # Draw boxes and show measurements
@@ -166,25 +184,40 @@ def main():
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
                 
                 # Get current values
-                rgb, intensity, edge_count = get_average_colors_and_edges(frame, bbox)
+                rgb, intensity = get_average_colors(frame, bbox)
                 
                 if monitoring and i in reference_values:
                     # Compare with reference
                     ref_intensity = reference_values[i]['intensity']
-                    ref_edge_count = reference_values[i]['edge_count']
                     change_intensity = compute_visibility_change(intensity, ref_intensity)
-                    change_edges = compute_visibility_change(edge_count, ref_edge_count)
                     
                     # Display status
-                    color = (0, 255, 0) if change_intensity < 20 and change_edges < 20 else (0, 0, 255)
-                    status = f"Change: Intensity {change_intensity:.1f}%, Edges {change_edges:.1f}%"
+                    color = (0, 255, 0) if change_intensity < 20 else (0, 0, 255)
+                    status = f"Change: Intensity {change_intensity:.1f}%"
                     cv2.putText(frame, status, (x1, y1-10), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
                 else:
-                    # Show current intensity and edge count
-                    cv2.putText(frame, f"I: {intensity:.1f}, E: {edge_count}", (x1, y1-10),
+                    # Show current intensity
+                    cv2.putText(frame, f"I: {intensity:.1f}", (x1, y1-10),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
             
+            if edge_detection_mode:
+                for bbox in bbox_list:
+                    x1, y1, x2, y2 = bbox
+                    edge_count, edges = get_edges(frame, bbox)
+                    cv2.imshow(f"Edge Detection {bbox_list.index(bbox)+1}", edges)
+                    cv2.putText(frame, f"Edges: {edge_count}", (x1, y2+20),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+
+            if color_change_monitoring:
+                for bbox in bbox_list:
+                    x1, y1, x2, y2 = bbox
+                    roi = frame[y1:y2, x1:x2]
+                    rgb_means = np.mean(roi, axis=(0, 1)).astype(int)
+                    rgb_means = np.round(rgb_means).astype(int)  # Round and convert to int
+                    cv2.putText(frame, f"RGB: {rgb_means}", (x1, y2+20),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+
             cv2.imshow("Visibility Monitor", frame)
 
         except Exception as e:
@@ -205,7 +238,19 @@ def main():
             print("Reset complete")
         elif key == ord('s'):
             save_reference_values()
-    
+        elif key == ord('e'):
+            edge_detection_mode = not edge_detection_mode
+            color_change_monitoring = False  # Deactivate color change monitoring mode
+            bbox_list.clear()  # Clear boxes
+            reference_values.clear()  # Clear reference values
+            print("Edge Detection Mode:", "Activated" if edge_detection_mode else "Deactivated")
+        elif key == ord('c'):
+            color_change_monitoring = not color_change_monitoring
+            edge_detection_mode = False  # Deactivate edge detection mode
+            bbox_list.clear()  # Clear boxes
+            reference_values.clear()  # Clear reference values
+            print("Color Change Monitoring:", "Activated" if color_change_monitoring else "Deactivated")
+
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
