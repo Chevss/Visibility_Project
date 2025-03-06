@@ -16,9 +16,10 @@ monitoring = False
 frame = None
 target_window = None
 window_rect = None
-edge_detection_mode = False
 color_change_monitoring = False
 distance_to_structure = 0.0  # Distance in meters
+background_color = np.array([0, 0, 0])  # Default background color (black)
+setting_background_color = False
 
 def get_average_colors(frame, bbox):
     """Get both RGB and grayscale intensity for a region."""
@@ -35,7 +36,7 @@ def get_average_colors(frame, bbox):
     
     return rgb_means, intensity
 
-def get_edges(frame, bbox):
+def get_edges(frame, bbox, threshold1=100, threshold2=200):
     """Apply Canny Edge Detection to the region inside the bounding box."""
     x1, y1, x2, y2 = bbox
     x = min(x1, x2)
@@ -45,7 +46,7 @@ def get_edges(frame, bbox):
     
     roi = frame[y:y+h, x:x+w]
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    edges = cv2.Canny(gray, 100, 200)
+    edges = cv2.Canny(gray, threshold1, threshold2)
     edge_count = np.sum(edges > 0)
     
     return edge_count, edges
@@ -55,7 +56,7 @@ def save_reference_values():
     data = {
         'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
         'boxes': bbox_list,
-        'values': {k: {'rgb': v['rgb'], 'intensity': float(v['intensity']), 'distance': v['distance']} for k, v in reference_values.items()}
+        'values': {k: {'rgb': v['rgb'], 'intensity': float(v['intensity']), 'distance': float(v['distance']), 'edges': int(v['edges'])} for k, v in reference_values.items()}
     }
     with open('reference_values.json', 'w') as f:
         json.dump(data, f)
@@ -84,20 +85,22 @@ def compute_visibility_change(current, reference, threshold=0.5):
         
     return change
 
-def compute_visibility(distance, intensity_change):
+def compute_visibility(distance, intensity_change, edge_change, color_change):
     """
-    Compute visibility based on distance and intensity change.
+    Compute visibility based on distance, intensity change, edge change, and color change.
     
     Args:
         distance: Distance from the camera to the structure in meters.
         intensity_change: The percentage change in intensity.
+        edge_change: The percentage change in edge count.
+        color_change: The percentage change in color.
     
     Returns:
         Visibility in meters.
     """
-    # Example formula: visibility decreases with intensity change
+    # Example formula: visibility decreases with intensity, edge, and color change
     # This is a placeholder formula and should be adjusted based on actual requirements
-    visibility = distance / (1 + intensity_change / 100)
+    visibility = distance / (1 + (intensity_change + edge_change + color_change) / 300)
     return visibility
 
 def compute_rgb_change(current_rgb, reference_rgb, threshold=5.0):
@@ -119,6 +122,37 @@ def compute_rgb_change(current_rgb, reference_rgb, threshold=5.0):
         return 0
         
     return change
+
+def compute_color_similarity(current_rgb, background_rgb):
+    """
+    Compute color similarity to the background color.
+    
+    Args:
+        current_rgb: Current RGB values
+        background_rgb: Background RGB values
+    
+    Returns:
+        The similarity percentage (0% to 100%).
+    """
+    similarity = np.linalg.norm(current_rgb - background_rgb) / np.linalg.norm(background_rgb) * 100
+    return similarity
+
+def compute_visibility_percentage(intensity_change, edge_change, color_change):
+    """
+    Compute visibility percentage based on intensity change, edge change, and color change.
+    
+    Args:
+        intensity_change: The percentage change in intensity.
+        edge_change: The percentage change in edge count.
+        color_change: The percentage change in color.
+    
+    Returns:
+        Visibility percentage (100% to 0%).
+    """
+    # Example formula: visibility decreases with intensity, edge, and color change
+    # This is a placeholder formula and should be adjusted based on actual requirements
+    visibility_percentage = max(0, 100 - (intensity_change + edge_change + color_change) / 3)
+    return visibility_percentage
 
 def get_window_by_title(title_pattern):
     """Find window by partial title match."""
@@ -146,7 +180,7 @@ def set_window_position():
 
 def mouse_callback(event, x, y, flags, param):
     """Handle mouse events for drawing boxes."""
-    global drawing, current_bbox, bbox_list, frame, distance_to_structure
+    global drawing, current_bbox, bbox_list, frame, distance_to_structure, setting_background_color, background_color
     
     if event == cv2.EVENT_LBUTTONDOWN and not monitoring:
         drawing = True
@@ -163,17 +197,25 @@ def mouse_callback(event, x, y, flags, param):
         current_bbox.append((x, y))
         x1, y1 = current_bbox[0]
         x2, y2 = current_bbox[1]
-        bbox_list.append((x1, y1, x2, y2))
         
-        if frame is not None:
-            rgb, intensity = get_average_colors(frame, (x1, y1, x2, y2))
-            distance_to_structure = float(input(f"Enter the distance from the camera to the structure for box {len(bbox_list)} (in meters): "))
-            reference_values[len(bbox_list)-1] = {
-                'rgb': rgb.tolist(),
-                'intensity': float(intensity),
-                'distance': distance_to_structure
-            }
-            print(f"Box {len(bbox_list)} created with intensity: {intensity:.2f} and distance: {distance_to_structure} meters")
+        if setting_background_color:
+            background_color, _ = get_average_colors(frame, (x1, y1, x2, y2))
+            print(f"Background color set to: {background_color}")
+            setting_background_color = False
+        else:
+            bbox_list.append((x1, y1, x2, y2))
+            
+            if frame is not None:
+                rgb, intensity = get_average_colors(frame, (x1, y1, x2, y2))
+                edge_count, _ = get_edges(frame, (x1, y1, x2, y2), threshold1=50, threshold2=150)
+                distance_to_structure = float(input(f"Enter the distance from the camera to the structure for box {len(bbox_list)} (in meters): "))
+                reference_values[len(bbox_list)-1] = {
+                    'rgb': rgb.tolist(),
+                    'intensity': float(intensity),
+                    'distance': distance_to_structure,
+                    'edges': edge_count
+                }
+                print(f"Box {len(bbox_list)} created with intensity: {intensity:.2f}, edges: {edge_count}, and distance: {distance_to_structure} meters")
         
         current_bbox = []
 
@@ -187,7 +229,7 @@ def close_all_edge_windows(edge_windows):
     edge_windows.clear()
 
 def main():
-    global frame, monitoring, target_window, window_rect, edge_detection_mode, color_change_monitoring
+    global frame, monitoring, target_window, window_rect, color_change_monitoring, background_color, setting_background_color
     
     # Initialize screen capture
     sct = mss()
@@ -217,8 +259,8 @@ def main():
     print("m: Start/stop monitoring")
     print("r: Reset boxes")
     print("s: Save reference values")
-    print("e: Toggle edge detection mode")
     print("c: Toggle color change monitoring")
+    print("b: Set background color")
     print("q: Quit\n")
     
     # Dictionary to store edge windows and their information
@@ -256,61 +298,40 @@ def main():
                     # Compare with reference
                     ref_rgb = np.array(reference_values[i]['rgb'])
                     ref_intensity = reference_values[i]['intensity']
+                    ref_edges = reference_values[i]['edges']
                     distance = reference_values[i]['distance']
                     change_rgb = compute_rgb_change(rgb, ref_rgb)
                     change_intensity = compute_visibility_change(intensity, ref_intensity, 4.0)
+                    edge_count, _ = get_edges(frame, bbox, threshold1=50, threshold2=150)
+                    change_edges = compute_visibility_change(edge_count, ref_edges, 4.0)
+                    color_similarity = compute_color_similarity(rgb, background_color)
                     
                     # Display status
                     color = (0, 255, 0) if change_intensity < 20 else (0, 0, 255)
-                    status = f"Change: Intensity {change_intensity:.1f}%"
-                    cv2.putText(frame, status, (x1, y1-10), 
+                    status = f"Change: {change_intensity:.1f}%"
+                    cv2.putText(frame, status, (x1, y1-20), 
                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
                     
                     if color_change_monitoring and change_rgb > 0:
-                        # Compute visibility based on color change
-                        visibility = compute_visibility(distance, change_intensity)
-                        cv2.putText(frame, f"Visibility: {visibility:.1f}m", (x1, y2+40),
+                        # Compute visibility percentage based on color change, edge change, and color similarity
+                        visibility_percentage = compute_visibility_percentage(change_intensity, change_edges, color_similarity)
+                        cv2.putText(frame, f"Distance: {distance:.1f}m", (x1, y2+30),
                                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
-
-                else:
+                        cv2.putText(frame, f"V Ratio: {visibility_percentage:.1f}%", (x1, y2+50),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                        # Display edge count
+                        cv2.putText(frame, f"Edges: {edge_count}", (x1, y2+70),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
                     # Show current intensity
-                    cv2.putText(frame, f"I: {intensity:.1f}", (x1, y1-10),
+                    cv2.putText(frame, f"I: {intensity:.1f}", (x1, y1-40),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-                
-                # Only handle edge detection if in edge detection mode
-                if edge_detection_mode:
-                    edge_count, edges = get_edges(frame, bbox)
-                    
-                    # Calculate box dimensions
-                    box_width = abs(x2 - x1)
-                    box_height = abs(y2 - y1)
-                    
-                    # Ensure minimum size for visibility (at least 100x100)
-                    display_width = max(box_width, 100)
-                    display_height = max(box_height, 100)
-                    
-                    # Create or update edge window with the same size as the box
-                    window_name = f"Edge Detection Box {i+1}"
-                    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
-                    cv2.imshow(window_name, edges)
-                    
-                    # Store window name in dictionary
-                    edge_windows[i] = window_name
-                    
-                    # Resize the window to match the box dimensions
-                    # Add a bit of extra padding (20px) for the window title bar
-                    cv2.resizeWindow(window_name, display_width, display_height)
-                    
-                    # Display edge count on main window
-                    cv2.putText(frame, f"Edges: {edge_count}", (x1, y2+20),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
                 
                 # Add color monitoring if enabled
                 if color_change_monitoring:
                     roi = frame[min(y1, y2):max(y1, y2), min(x1, x2):max(x1, x2)]
                     if roi.size > 0:  # Ensure ROI is not empty
                         rgb_means = np.mean(roi, axis=(0, 1)).astype(int)
-                        cv2.putText(frame, f"RGB: {rgb_means}", (x1, y2+20),
+                        cv2.putText(frame, f"{rgb_means}", (x1, y2+10),
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
             cv2.imshow("Visibility Monitor", frame)
@@ -335,36 +356,14 @@ def main():
             print("Reset complete")
         elif key == ord('s'):
             save_reference_values()
-        elif key == ord('e'):
-            # Toggle edge detection mode
-            edge_detection_mode = not edge_detection_mode
-            
-            # If turning off edge detection, close all edge windows
-            if not edge_detection_mode:
-                close_all_edge_windows(edge_windows)
-            
-            # If switching from color monitoring to edge detection, clear boxes
-            if edge_detection_mode and color_change_monitoring:
-                color_change_monitoring = False
-                bbox_list.clear()  # Clear boxes when switching modes
-                reference_values.clear()
-                print("Switched to Edge Detection Mode")
-            else:
-                print("Edge Detection Mode:", "Activated" if edge_detection_mode else "Deactivated")
-                
         elif key == ord('c'):
             # Toggle color change monitoring
             color_change_monitoring = not color_change_monitoring
-            
-            # If turning on color monitoring, ensure edge detection is off
-            if color_change_monitoring and edge_detection_mode:
-                edge_detection_mode = False
-                close_all_edge_windows(edge_windows)
-                bbox_list.clear()  # Clear boxes when switching modes
-                reference_values.clear()
-                print("Switched to Color Change Monitoring Mode")
-            else:
-                print("Color Change Monitoring:", "Activated" if color_change_monitoring else "Deactivated")
+            print("Color Change Monitoring:", "Activated" if color_change_monitoring else "Deactivated")
+        elif key == ord('b'):
+            # Set background color
+            setting_background_color = True
+            print("Draw a box to set the background color")
 
     # Clean up all windows
     close_all_edge_windows(edge_windows)
