@@ -228,27 +228,68 @@ def close_all_edge_windows(edge_windows):
             pass
     edge_windows.clear()
 
+def initialize_camera(camera_choice):
+    """
+    Initialize the camera based on the user's choice.
+    
+    Args:
+        camera_choice: 0 for default webcam, 1 for secondary webcam, 2 for RTSP stream.
+    
+    Returns:
+        A cv2.VideoCapture object or None if initialization fails.
+    """
+    if camera_choice == 0:
+        return cv2.VideoCapture(0)
+    elif camera_choice == 1:
+        return cv2.VideoCapture(1)
+    elif camera_choice == 2:
+        # List of possible URLs to try
+        urls = [
+            "rtsp://buth:4ytkfe@192.168.1.210/live/ch00_1"
+        ]
+        for url in urls:
+            cap = cv2.VideoCapture(url)
+            if cap.isOpened():
+                return cap
+    return None
+
 def main():
     global frame, monitoring, target_window, window_rect, color_change_monitoring, background_color, setting_background_color
     
-    # Initialize screen capture
-    sct = mss()
-
-    # Find Edge window
-    windows = get_window_by_title("edge")
-    if not windows:
-        print("No Edge window found! Please open Edge browser first.")
-        return
+    # Ask the user to choose between screen capture or camera
+    print("Choose input source:")
+    print("0: Default Webcam")
+    print("1: Secondary Webcam")
+    print("2: USB Webcam")
+    print("3: RTSP Stream")
+    print("4: Screen Capture")
+    input_choice = int(input("Enter your choice: "))
     
-    # Let user select which window if multiple found
-    if len(windows) > 1:
-        print("Multiple Edge windows found. Please select one:")
-        for i, (_, title) in enumerate(windows):
-            print(f"{i}: {title}")
-        selection = int(input("Enter number: "))
-        target_window = windows[selection][0]
+    if input_choice in [0, 1, 2, 3, 4]:
+        cap = initialize_camera(input_choice)
+        if not cap or not cap.isOpened():
+            print("Failed to initialize camera. Exiting...")
+            return
     else:
-        target_window = windows[0][0]
+        # Initialize screen capture
+        sct = mss()
+
+    # Find Edge window if screen capture is selected
+    if input_choice == 3:
+        windows = get_window_by_title("edge")
+        if not windows:
+            print("No Edge window found! Please open Edge browser first.")
+            return
+        
+        # Let user select which window if multiple found
+        if len(windows) > 1:
+            print("Multiple Edge windows found. Please select one:")
+            for i, (_, title) in enumerate(windows):
+                print(f"{i}: {title}")
+            selection = int(input("Enter number: "))
+            target_window = windows[selection][0]
+        else:
+            target_window = windows[0][0]
 
     # Create window
     cv2.namedWindow("Visibility Monitor")
@@ -267,80 +308,84 @@ def main():
     edge_windows = {}
     
     while True:
-        if not set_window_position() or not window_rect:
-            print("Waiting for window...")
-            time.sleep(1)
-            continue
-
-        try:
-            # Capture specific window
-            screenshot = sct.grab({
-                'left': window_rect[0],
-                'top': window_rect[1],
-                'width': window_rect[2] - window_rect[0],
-                'height': window_rect[3] - window_rect[1]
-            })
-            
-            frame = np.array(screenshot)
-            if frame.size == 0:
+        if input_choice == 3:  # Screen capture
+            if not set_window_position() or not window_rect:
+                print("Waiting for window...")
+                time.sleep(1)
                 continue
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+
+            try:
+                # Capture specific window
+                screenshot = sct.grab({
+                    'left': window_rect[0],
+                    'top': window_rect[1],
+                    'width': window_rect[2] - window_rect[0],
+                    'height': window_rect[3] - window_rect[1]
+                })
+                frame = np.array(screenshot)
+                if frame.size == 0:
+                    continue
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+            except Exception as e:
+                print(f"Error capturing window: {e}")
+                time.sleep(1)
+                continue
+        else:  # Camera feed
+            ret, frame = cap.read()
+            if not ret:
+                print("Failed to capture frame from camera. Exiting...")
+                break
+
+        # Draw boxes and show measurements
+        for i, bbox in enumerate(bbox_list):
+            x1, y1, x2, y2 = bbox
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
             
-            # Draw boxes and show measurements
-            for i, bbox in enumerate(bbox_list):
-                x1, y1, x2, y2 = bbox
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            # Get current values
+            rgb, intensity = get_average_colors(frame, bbox)
+            
+            if monitoring and i in reference_values:
+                # Compare with reference
+                ref_rgb = np.array(reference_values[i]['rgb'])
+                ref_intensity = reference_values[i]['intensity']
+                ref_edges = reference_values[i]['edges']
+                distance = reference_values[i]['distance']
+                change_rgb = compute_rgb_change(rgb, ref_rgb)
+                change_intensity = compute_visibility_change(intensity, ref_intensity, 4.0)
+                edge_count, _ = get_edges(frame, bbox, threshold1=50, threshold2=150)
+                change_edges = compute_visibility_change(edge_count, ref_edges, 4.0)
+                color_similarity = compute_color_similarity(rgb, background_color)
                 
-                # Get current values
-                rgb, intensity = get_average_colors(frame, bbox)
+                # Display status
+                color = (0, 255, 0) if change_intensity < 20 else (0, 0, 255)
+                status = f"Change: {change_intensity:.1f}%"
+                cv2.putText(frame, status, (x1, y1-20), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
                 
-                if monitoring and i in reference_values:
-                    # Compare with reference
-                    ref_rgb = np.array(reference_values[i]['rgb'])
-                    ref_intensity = reference_values[i]['intensity']
-                    ref_edges = reference_values[i]['edges']
-                    distance = reference_values[i]['distance']
-                    change_rgb = compute_rgb_change(rgb, ref_rgb)
-                    change_intensity = compute_visibility_change(intensity, ref_intensity, 4.0)
-                    edge_count, _ = get_edges(frame, bbox, threshold1=50, threshold2=150)
-                    change_edges = compute_visibility_change(edge_count, ref_edges, 4.0)
-                    color_similarity = compute_color_similarity(rgb, background_color)
-                    
-                    # Display status
-                    color = (0, 255, 0) if change_intensity < 20 else (0, 0, 255)
-                    status = f"Change: {change_intensity:.1f}%"
-                    cv2.putText(frame, status, (x1, y1-20), 
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-                    
-                    if color_change_monitoring and change_rgb > 0:
-                        # Compute visibility percentage based on color change, edge change, and color similarity
-                        visibility_percentage = compute_visibility_percentage(change_intensity, change_edges, color_similarity)
-                        cv2.putText(frame, f"Distance: {distance:.1f}m", (x1, y2+30),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
-                        cv2.putText(frame, f"V Ratio: {visibility_percentage:.1f}%", (x1, y2+50),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
-                        # Display edge count
-                        cv2.putText(frame, f"Edges: {edge_count}", (x1, y2+70),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
-                    # Show current intensity
-                    cv2.putText(frame, f"I: {intensity:.1f}", (x1, y1-40),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-                
-                # Add color monitoring if enabled
-                if color_change_monitoring:
-                    roi = frame[min(y1, y2):max(y1, y2), min(x1, x2):max(x1, x2)]
-                    if roi.size > 0:  # Ensure ROI is not empty
-                        rgb_means = np.mean(roi, axis=(0, 1)).astype(int)
-                        cv2.putText(frame, f"{rgb_means}", (x1, y2+10),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                if color_change_monitoring and change_rgb > 0:
+                    # Compute visibility percentage based on color change, edge change, and color similarity
+                    visibility_percentage = compute_visibility_percentage(change_intensity, change_edges, color_similarity)
+                    cv2.putText(frame, f"Distance: {distance:.1f}m", (x1, y2+30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                    cv2.putText(frame, f"V Ratio: {visibility_percentage:.1f}%", (x1, y2+50),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                    # Display edge count
+                    cv2.putText(frame, f"Edges: {edge_count}", (x1, y2+70),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+                # Show current intensity
+                cv2.putText(frame, f"I: {intensity:.1f}", (x1, y1-40),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+            
+            # Add color monitoring if enabled
+            if color_change_monitoring:
+                roi = frame[min(y1, y2):max(y1, y2), min(x1, x2):max(x1, x2)]
+                if roi.size > 0:  # Ensure ROI is not empty
+                    rgb_means = np.mean(roi, axis=(0, 1)).astype(int)
+                    cv2.putText(frame, f"{rgb_means}", (x1, y2+10),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
 
-            cv2.imshow("Visibility Monitor", frame)
+        cv2.imshow("Visibility Monitor", frame)
 
-        except Exception as e:
-            print(f"Error capturing window: {e}")
-            time.sleep(1)
-            continue
-        
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             break
@@ -366,6 +411,8 @@ def main():
             print("Draw a box to set the background color")
 
     # Clean up all windows
+    if input_choice in [0, 1, 2]:
+        cap.release()
     close_all_edge_windows(edge_windows)
     cv2.destroyAllWindows()
 
